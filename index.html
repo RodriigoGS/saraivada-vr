@@ -1,0 +1,422 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Saraivada VR — protótipo</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #8fd3ff; }
+  canvas { display: block; touch-action: none; }
+  #ui {
+    position: fixed; left: 12px; bottom: 12px; max-width: 340px;
+    font: 14px/1.45 ui-monospace, Menlo, Consolas, monospace;
+    color: #fff; background: rgba(20, 24, 40, .78); padding: 10px 12px; border-radius: 6px;
+  }
+  #ui b { color: #ffd84a; }
+  #vr {
+    margin-top: 8px; padding: 8px 14px; font: inherit; font-weight: 700; cursor: pointer;
+    color: #14182a; background: #ffd84a; border: 0; border-radius: 4px;
+  }
+  #vr[disabled] { background: #7a8094; color: #dfe3ee; cursor: default; }
+</style>
+</head>
+<body>
+<div id="ui">
+  <div><b>A / D</b> ou <b>← →</b> (ou arraste) para mover. As flechas saem sozinhas.</div>
+  <div>Passe pelo portão do upgrade que quiser. <b>Espaço</b> reinicia.</div>
+  <button id="vr" disabled>VR indisponível aqui</button>
+</div>
+
+<script type="module">
+import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+// ---------- constantes ----------
+const W = 3;            // meia largura da pista (m)
+const SPAWN_Z = -60;    // onde as coisas nascem
+const RUN = 8;          // velocidade de "corrida" (o mundo vem até o jogador)
+const ARROW_SPEED = 32;
+const MAX_ARROWS = 12;
+const MOVE_SPEED = 5;   // m/s lateral
+
+// ---------- cena ----------
+const renderer = new THREE.WebGLRenderer({ antialias: false });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
+renderer.setSize(innerWidth, innerHeight);
+renderer.xr.enabled = true;
+document.body.appendChild(renderer.domElement);
+
+const SKY = new THREE.Color(0x8fd3ff), HURT = new THREE.Color(0xd94a4a);
+const scene = new THREE.Scene();
+scene.background = SKY.clone();
+scene.fog = new THREE.Fog(SKY.getHex(), 30, 68);
+
+const rig = new THREE.Group();
+scene.add(rig);
+const camera = new THREE.PerspectiveCamera(70, innerWidth / innerHeight, 0.05, 200);
+camera.position.set(0, 1.6, 0);
+rig.add(camera);
+
+scene.add(new THREE.HemisphereLight(0xffffff, 0x5a7a4a, 1.1));
+const sun = new THREE.DirectionalLight(0xffffff, 1.2);
+sun.position.set(4, 10, 6);
+scene.add(sun);
+
+const BOX = new THREE.BoxGeometry(1, 1, 1);
+const mat = c => new THREE.MeshLambertMaterial({ color: c });
+function box(material, sx, sy, sz, x = 0, y = 0, z = 0, parent = scene) {
+  const m = new THREE.Mesh(BOX, material);
+  m.scale.set(sx, sy, sz);
+  m.position.set(x, y, z);
+  parent.add(m);
+  return m;
+}
+
+// chão + pista
+box(mat(0x6fbf5a), 80, 1, 160, 0, -0.55, -50);
+box(mat(0xd9b676), W * 2, 1, 160, 0, -0.5, -50);
+box(mat(0x8a6a3c), 0.25, 0.3, 160, -W - 0.12, 0.1, -50);
+box(mat(0x8a6a3c), 0.25, 0.3, 160, W + 0.12, 0.1, -50);
+
+// decoração que rola (dá a sensação de velocidade)
+const SPAN = 72;
+const scroll = [];
+const stripeMat = mat(0xc49f5e), trunkMat = mat(0x7a5230), leafMat = mat(0x3f9a4a), rockMat = mat(0x9aa0a8);
+for (let i = 0; i < 18; i++) scroll.push(box(stripeMat, W * 2, 0.02, 0.5, 0, 0.01, -i * 4));
+for (let i = 0; i < 24; i++) {
+  const side = i % 2 ? 1 : -1;
+  const x = side * (W + 1.5 + Math.random() * 7);
+  const g = new THREE.Group();
+  g.position.set(x, 0, -i * 3);
+  if (Math.random() < 0.7) {
+    const h = 1 + Math.random() * 1.2;
+    box(trunkMat, 0.4, h, 0.4, 0, h / 2, 0, g);
+    box(leafMat, 1.6, 1.4, 1.6, 0, h + 0.7, 0, g);
+    box(leafMat, 1.0, 0.8, 1.0, 0, h + 1.8, 0, g);
+  } else {
+    box(rockMat, 1.2, 0.8, 1.0, 0, 0.4, 0, g);
+  }
+  scene.add(g);
+  scroll.push(g);
+}
+
+// ---------- textos em canvas ----------
+function labelTexture(text, bg) {
+  const c = document.createElement('canvas');
+  c.width = 256; c.height = 192;
+  const g = c.getContext('2d');
+  g.fillStyle = bg; g.fillRect(0, 0, 256, 192);
+  g.strokeStyle = '#fff'; g.lineWidth = 10; g.strokeRect(5, 5, 246, 182);
+  g.fillStyle = '#fff'; g.textAlign = 'center'; g.textBaseline = 'middle';
+  g.font = 'bold 40px monospace';
+  const lines = text.split('\n');
+  lines.forEach((l, i) => g.fillText(l, 128, 96 + (i - (lines.length - 1) / 2) * 48));
+  const t = new THREE.CanvasTexture(c);
+  t.magFilter = THREE.NearestFilter;
+  t.colorSpace = THREE.SRGBColorSpace;
+  return t;
+}
+
+// HUD fixo no mundo (funciona igual no desktop e no VR)
+const hudCanvas = document.createElement('canvas');
+hudCanvas.width = 768; hudCanvas.height = 192;
+const hudCtx = hudCanvas.getContext('2d');
+const hudTex = new THREE.CanvasTexture(hudCanvas);
+hudTex.colorSpace = THREE.SRGBColorSpace;
+const hud = new THREE.Mesh(
+  new THREE.PlaneGeometry(4.8, 1.2),
+  new THREE.MeshBasicMaterial({ map: hudTex, transparent: true, fog: false })
+);
+hud.position.set(0, 3.4, -9);
+hud.rotation.x = 0.2;
+scene.add(hud);
+
+function drawHud() {
+  const g = hudCtx;
+  g.clearRect(0, 0, 768, 192);
+  g.fillStyle = 'rgba(20,24,40,.82)'; g.fillRect(0, 0, 768, 192);
+  g.textBaseline = 'middle';
+  if (S.over) {
+    g.textAlign = 'center';
+    g.fillStyle = '#ffd84a'; g.font = 'bold 54px monospace';
+    g.fillText('FIM DE JOGO  ' + S.score + ' pts', 384, 66);
+    g.fillStyle = '#fff'; g.font = '30px monospace';
+    g.fillText('gatilho / espaço / clique para recomeçar', 384, 136);
+  } else {
+    g.textAlign = 'left';
+    g.fillStyle = '#ff5a6a'; g.font = 'bold 46px monospace';
+    g.fillText('♥'.repeat(S.hp), 24, 50);
+    g.textAlign = 'right';
+    g.fillStyle = '#ffd84a';
+    g.fillText(S.score + ' pts', 744, 50);
+    g.textAlign = 'left';
+    g.fillStyle = '#fff'; g.font = '28px monospace';
+    g.fillText(`flechas ${S.arrows}  dano ${S.dmg}  cad ${S.rate.toFixed(1)}/s  perf ${S.pierce}`, 24, 112);
+    g.fillStyle = '#8fe38a'; g.font = 'bold 30px monospace';
+    if (S.msgT > 0) g.fillText(S.msg, 24, 160);
+  }
+  hudTex.needsUpdate = true;
+}
+
+// ---------- estado ----------
+let S;
+const arrows = [], arrowPool = [], enemies = [], gates = [];
+const arrowMat = mat(0xfff2a8);
+const enemyMats = [mat(0x7ac74f), mat(0xe8a23a), mat(0xd9534f), mat(0x9b59b6)];
+const bossMat = mat(0x3a2a4a), eyeMat = mat(0x14182a), barMat = new THREE.MeshBasicMaterial({ color: 0xff5a6a });
+
+const UPGRADES = [
+  { txt: '+1\nFLECHA', bg: '#2e7dd1', ok: () => S.arrows < MAX_ARROWS, fn: () => S.arrows++ },
+  { txt: '+ DANO', bg: '#d1552e', ok: () => true, fn: () => { S.dmg = Math.max(S.dmg + 1, Math.round(S.dmg * 1.25)); } },
+  { txt: '+20%\nCADÊNCIA', bg: '#2ea86b', ok: () => S.rate < 10, fn: () => { S.rate = Math.min(10, S.rate * 1.2); } },
+  { txt: '+1\nPERFURA', bg: '#8a4fd1', ok: () => S.pierce < 3, fn: () => S.pierce++ },
+  { txt: '+1 VIDA', bg: '#d12e6b', ok: () => S.hp < 8, fn: () => S.hp++ },
+];
+
+function reset() {
+  for (const a of arrows) { a.visible = false; arrowPool.push(a); }
+  arrows.length = 0;
+  for (const e of enemies) scene.remove(e.g);
+  enemies.length = 0;
+  for (const p of gates) removeGate(p);
+  gates.length = 0;
+  S = {
+    hp: 5, score: 0, t: 0, arrows: 1, dmg: 1, rate: 2.5, pierce: 0,
+    fireCd: 0, spawnCd: 1.5, gateCd: 5, bossAt: 45,
+    over: false, overT: 0, hurt: 0, msg: '', msgT: 0, hudT: 0,
+  };
+  rig.position.x = 0;
+  drawHud();
+}
+
+// ---------- flechas ----------
+function fire(px) {
+  const n = S.arrows, gap = 0.28, x0 = px - (n - 1) * gap / 2;
+  for (let i = 0; i < n; i++) {
+    const a = arrowPool.pop() || box(arrowMat, 0.07, 0.07, 0.8);
+    a.visible = true;
+    a.position.set(x0 + i * gap, 1.0, -0.6);
+    a.userData.pierce = S.pierce;
+    a.userData.hit = null;
+    arrows.push(a);
+  }
+}
+
+// ---------- inimigos ----------
+function enemyHp() { return Math.ceil(2 * Math.pow(1.025, S.t)); }
+
+function spawnEnemy(boss) {
+  const hp = boss ? enemyHp() * 25 : enemyHp();
+  const size = boss ? 2.4 : 0.8;
+  const g = new THREE.Group();
+  const tier = Math.min(enemyMats.length - 1, Math.floor(S.t / 40));
+  box(boss ? bossMat : enemyMats[tier], 1, 1, 1, 0, 0.5, 0, g);
+  box(eyeMat, 0.18, 0.18, 0.05, -0.22, 0.65, 0.5, g);
+  box(eyeMat, 0.18, 0.18, 0.05, 0.22, 0.65, 0.5, g);
+  const bar = box(barMat, 1, 0.1, 0.05, 0, 1.25, 0, g);
+  g.scale.setScalar(size);
+  g.position.set(boss ? 0 : (Math.random() * 2 - 1) * (W - 0.5), 0, SPAWN_Z);
+  scene.add(g);
+  enemies.push({ g, bar, hp, max: hp, size, boss, spd: boss ? -4 : 2 + Math.random() * 2, flash: 0 });
+}
+
+// ---------- portões ----------
+function spawnGates() {
+  const pool = UPGRADES.filter(u => u.ok());
+  const a = pool.splice(Math.floor(Math.random() * pool.length), 1)[0];
+  const b = pool[Math.floor(Math.random() * pool.length)];
+  const pair = { z: SPAWN_Z, sides: [] };
+  [a, b].forEach((up, i) => {
+    const m = new THREE.Mesh(
+      new THREE.PlaneGeometry(W - 0.15, 2.3),
+      new THREE.MeshBasicMaterial({ map: labelTexture(up.txt, up.bg), transparent: true, opacity: 0.85, side: THREE.DoubleSide })
+    );
+    m.position.set((i ? 1 : -1) * W / 2, 1.25, SPAWN_Z);
+    scene.add(m);
+    pair.sides.push({ m, up });
+  });
+  gates.push(pair);
+}
+function removeGate(pair) {
+  for (const s of pair.sides) {
+    scene.remove(s.m);
+    s.m.material.map.dispose(); s.m.material.dispose(); s.m.geometry.dispose();
+  }
+}
+
+// ---------- entrada ----------
+const keys = {};
+addEventListener('keydown', e => { keys[e.code] = true; if (e.code === 'Space' && S.over) reset(); });
+addEventListener('keyup', e => { keys[e.code] = false; });
+let drag = false;
+const steer = e => { rig.position.x = (e.clientX / innerWidth * 2 - 1) * W; };
+renderer.domElement.addEventListener('pointerdown', e => { if (S.over && S.overT > 0.6) { reset(); return; } drag = true; steer(e); });
+renderer.domElement.addEventListener('pointermove', e => { if (drag) steer(e); });
+addEventListener('pointerup', () => { drag = false; });
+
+// controles VR: cubinhos nas mãos
+const handMat = mat(0xffd84a);
+for (let i = 0; i < 2; i++) {
+  const c = renderer.xr.getController(i);
+  box(handMat, 0.06, 0.06, 0.14, 0, 0, 0, c);
+  rig.add(c);
+}
+
+function readXR() {
+  const out = { move: 0, trigger: false };
+  const session = renderer.xr.getSession();
+  if (!session) return out;
+  for (const src of session.inputSources) {
+    const gp = src.gamepad;
+    if (!gp) continue;
+    const stick = gp.axes[2] || 0, pad = gp.axes[0] || 0;
+    const ax = Math.abs(stick) > Math.abs(pad) ? stick : pad;
+    if (Math.abs(ax) > 0.15) out.move += ax;
+    if (gp.buttons[0] && gp.buttons[0].pressed) out.trigger = true;
+  }
+  return out;
+}
+
+// ---------- loop ----------
+function damagePlayer(n) {
+  S.hp = Math.max(0, S.hp - n);
+  S.hurt = 0.25;
+  if (S.hp === 0) { S.over = true; S.overT = 0; }
+  drawHud();
+}
+
+function update(dt) {
+  const xr = readXR();
+
+  // movimento lateral (teclado + analógico); a cabeça também conta no VR
+  let move = xr.move;
+  if (keys.KeyA || keys.ArrowLeft) move -= 1;
+  if (keys.KeyD || keys.ArrowRight) move += 1;
+  rig.position.x += THREE.MathUtils.clamp(move, -1, 1) * MOVE_SPEED * dt;
+  const headX = renderer.xr.isPresenting ? camera.position.x : 0;
+  const lim = W - 0.35;
+  rig.position.x = THREE.MathUtils.clamp(rig.position.x, -lim - headX, lim - headX);
+  const px = rig.position.x + headX;
+
+  // feedback de dano
+  S.hurt = Math.max(0, S.hurt - dt);
+  scene.background.lerpColors(SKY, HURT, S.hurt / 0.25);
+  scene.fog.color.copy(scene.background);
+
+  if (S.over) {
+    S.overT += dt;
+    if (xr.trigger && S.overT > 0.8) reset();
+    return;
+  }
+
+  S.t += dt;
+  const dz = RUN * dt;
+
+  // cenário
+  for (const o of scroll) { o.position.z += dz; if (o.position.z > 6) o.position.z -= SPAN; }
+
+  // tiro automático
+  S.fireCd -= dt;
+  if (S.fireCd <= 0) { fire(px); S.fireCd += 1 / S.rate; }
+
+  // spawns
+  S.spawnCd -= dt;
+  if (S.spawnCd <= 0) { spawnEnemy(false); S.spawnCd = Math.max(0.35, 1.2 - S.t * 0.008); }
+  S.gateCd -= dt;
+  if (S.gateCd <= 0) { spawnGates(); S.gateCd = 10; }
+  if (S.t >= S.bossAt) { spawnEnemy(true); S.bossAt += 45; S.msg = 'CHEFE!'; S.msgT = 2; drawHud(); }
+
+  // portões
+  for (let i = gates.length - 1; i >= 0; i--) {
+    const p = gates[i];
+    p.z += dz;
+    for (const s of p.sides) s.m.position.z = p.z;
+    if (p.z >= 0) {
+      const up = p.sides[px < 0 ? 0 : 1].up;
+      up.fn();
+      S.msg = up.txt.replace('\n', ' '); S.msgT = 1.8;
+      removeGate(p); gates.splice(i, 1);
+      drawHud();
+    }
+  }
+
+  // inimigos
+  for (let i = enemies.length - 1; i >= 0; i--) {
+    const e = enemies[i];
+    e.g.position.z += (RUN + e.spd) * dt;
+    e.g.position.x += THREE.MathUtils.clamp(px - e.g.position.x, -1, 1) * dt;
+    e.flash = Math.max(0, e.flash - dt);
+    e.g.scale.setScalar(e.size * (1 + e.flash * 1.5));
+    const reach = e.size * 0.5 + 0.3;
+    if (e.g.position.z > -reach && e.g.position.z < 1 && Math.abs(e.g.position.x - px) < reach) {
+      scene.remove(e.g); enemies.splice(i, 1);
+      damagePlayer(e.boss ? 3 : 1);
+      if (S.over) return;
+    } else if (e.g.position.z > 4) {
+      scene.remove(e.g); enemies.splice(i, 1);
+    }
+  }
+
+  // flechas + colisão
+  for (let i = arrows.length - 1; i >= 0; i--) {
+    const a = arrows[i];
+    a.position.z -= ARROW_SPEED * dt;
+    let dead = a.position.z < SPAWN_Z;
+    for (let j = enemies.length - 1; j >= 0 && !dead; j--) {
+      const e = enemies[j];
+      if (a.userData.hit === e) continue;
+      const half = e.size * 0.5;
+      if (Math.abs(a.position.x - e.g.position.x) < half + 0.05 && Math.abs(a.position.z - e.g.position.z) < half + 0.5) {
+        e.hp -= S.dmg;
+        e.flash = 0.08;
+        e.bar.scale.x = Math.max(0.001, e.hp / e.max);
+        if (e.hp <= 0) {
+          S.score += e.max;
+          if (e.boss) { S.hp = Math.min(8, S.hp + 1); S.msg = 'CHEFE DERROTADO +1 VIDA'; S.msgT = 2; drawHud(); }
+          scene.remove(e.g); enemies.splice(j, 1);
+        }
+        if (a.userData.pierce > 0) { a.userData.pierce--; a.userData.hit = e; }
+        else dead = true;
+      }
+    }
+    if (dead) { a.visible = false; arrowPool.push(a); arrows.splice(i, 1); }
+  }
+
+  // HUD (5x por segundo)
+  if (S.msgT > 0) S.msgT -= dt;
+  S.hudT -= dt;
+  if (S.hudT <= 0) { S.hudT = 0.2; drawHud(); }
+}
+
+reset();
+const clock = new THREE.Clock();
+renderer.setAnimationLoop(() => {
+  update(Math.min(clock.getDelta(), 0.05));
+  renderer.render(scene, camera);
+});
+
+addEventListener('resize', () => {
+  if (renderer.xr.isPresenting) return;
+  camera.aspect = innerWidth / innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+
+// ---------- botão de VR ----------
+const ui = document.getElementById('ui'), vrBtn = document.getElementById('vr');
+renderer.xr.addEventListener('sessionstart', () => { ui.style.display = 'none'; });
+renderer.xr.addEventListener('sessionend', () => { ui.style.display = ''; });
+if (navigator.xr) {
+  navigator.xr.isSessionSupported('immersive-vr').then(ok => {
+    if (!ok) return;
+    vrBtn.disabled = false;
+    vrBtn.textContent = 'Entrar em VR';
+    vrBtn.onclick = () => {
+      navigator.xr.requestSession('immersive-vr', { optionalFeatures: ['local-floor', 'bounded-floor'] })
+        .then(s => renderer.xr.setSession(s))
+        .catch(err => { vrBtn.textContent = 'Falhou: ' + err.name; });
+    };
+  }).catch(() => {});
+}
+</script>
+</body>
+</html>
